@@ -4,64 +4,47 @@ namespace App\Services;
 
 use Carbon\Carbon;
 
+/**
+ * 사주 계산 서비스 (만세력 적용)
+ *
+ * 만세력 기준으로 정확한 사주팔자를 계산합니다.
+ * - 년주: 입춘(立春) 기준으로 변경
+ * - 월주: 절기(節氣) 기준으로 변경
+ * - 일주: 만세력 일진표 기준
+ * - 시주: 일간 기준 시간 배치
+ */
 class SajuCalculatorService
 {
-    // 천간 (Heavenly Stems) - 10개
-    private const HEAVENLY_STEMS = ['갑', '을', '병', '정', '무', '기', '경', '신', '임', '계'];
-    private const HEAVENLY_STEMS_HANJA = ['甲', '乙', '丙', '丁', '戊', '己', '庚', '辛', '壬', '癸'];
-
-    // 지지 (Earthly Branches) - 12개
-    private const EARTHLY_BRANCHES = ['자', '축', '인', '묘', '진', '사', '오', '미', '신', '유', '술', '해'];
-    private const EARTHLY_BRANCHES_HANJA = ['子', '丑', '寅', '卯', '辰', '巳', '午', '未', '申', '酉', '戌', '亥'];
-
-    // 오행 (Five Elements)
-    private const FIVE_ELEMENTS = [
-        '갑' => 'wood', '을' => 'wood',
-        '병' => 'fire', '정' => 'fire',
-        '무' => 'earth', '기' => 'earth',
-        '경' => 'metal', '신' => 'metal',
-        '임' => 'water', '계' => 'water',
-        '자' => 'water', '축' => 'earth',
-        '인' => 'wood', '묘' => 'wood',
-        '진' => 'earth', '사' => 'fire',
-        '오' => 'fire', '미' => 'earth',
-        '신' => 'metal', '유' => 'metal',
-        '술' => 'earth', '해' => 'water',
-    ];
-
-    // 시간대별 지지
-    private const HOUR_BRANCHES = [
-        0 => '자', 1 => '자',    // 23:00 - 01:00
-        2 => '축', 3 => '축',    // 01:00 - 03:00
-        4 => '인', 5 => '인',    // 03:00 - 05:00
-        6 => '묘', 7 => '묘',    // 05:00 - 07:00
-        8 => '진', 9 => '진',    // 07:00 - 09:00
-        10 => '사', 11 => '사',  // 09:00 - 11:00
-        12 => '오', 13 => '오',  // 11:00 - 13:00
-        14 => '미', 15 => '미',  // 13:00 - 15:00
-        16 => '신', 17 => '신',  // 15:00 - 17:00
-        18 => '유', 19 => '유',  // 17:00 - 19:00
-        20 => '술', 21 => '술',  // 19:00 - 21:00
-        22 => '해', 23 => '해',  // 21:00 - 23:00
-    ];
-
     /**
-     * Calculate Saju (Four Pillars) from birth date and time
+     * 사주팔자 계산 (양력 날짜 기준)
      */
     public function calculate(Carbon $birthDate, ?string $birthTime = null): array
     {
-        $year = $birthDate->year;
-        $month = $birthDate->month;
-        $day = $birthDate->day;
         $hour = $this->parseHour($birthTime);
 
-        // Calculate each pillar
-        $yearPillar = $this->calculateYearPillar($year);
-        $monthPillar = $this->calculateMonthPillar($year, $month);
-        $dayPillar = $this->calculateDayPillar($birthDate);
-        $hourPillar = $this->calculateHourPillar($dayPillar['stem'], $hour);
+        // 자시(23:00~01:00) 처리: 23시 이후면 다음날로 계산
+        $adjustedDate = $birthDate->copy();
+        if ($hour === 23) {
+            $adjustedDate->addDay();
+        }
 
-        // Calculate five elements distribution
+        // 절기 기준 년월 계산
+        $sajuYear = $this->getSajuYear($birthDate);
+        $sajuMonth = $this->getSajuMonth($birthDate);
+
+        // 년주 계산 (입춘 기준)
+        $yearPillar = $this->calculateYearPillar($sajuYear);
+
+        // 월주 계산 (절기 기준)
+        $monthPillar = $this->calculateMonthPillar($sajuYear, $sajuMonth, $yearPillar['stem_index']);
+
+        // 일주 계산 (만세력 기준)
+        $dayPillar = $this->calculateDayPillar($adjustedDate);
+
+        // 시주 계산 (일간 기준)
+        $hourPillar = $this->calculateHourPillar($dayPillar['stem_index'], $hour);
+
+        // 오행 분포 계산
         $fiveElements = $this->calculateFiveElements([
             $yearPillar, $monthPillar, $dayPillar, $hourPillar
         ]);
@@ -84,20 +67,194 @@ class SajuCalculatorService
                 'hour_ji' => $hourPillar['branch'],
                 'five_elements' => $fiveElements,
                 'day_master' => $dayPillar['stem'],
+                'saju_year' => $sajuYear,
+                'saju_month' => $sajuMonth,
             ],
         ];
     }
 
     /**
-     * Parse hour from time string
+     * 사주 년도 계산 (입춘 기준)
+     * 입춘 이전이면 전년도로 계산
+     */
+    private function getSajuYear(Carbon $date): int
+    {
+        $year = $date->year;
+
+        // 해당 년도의 입춘 날짜 가져오기
+        $ipchunDate = $this->getSolarTermDate($year, '입춘');
+
+        // 입춘 이전이면 전년도
+        if ($date->lt($ipchunDate)) {
+            return $year - 1;
+        }
+
+        return $year;
+    }
+
+    /**
+     * 사주 월 계산 (절기 기준)
+     * 절입일 기준으로 월이 바뀜 (1=인월, 2=묘월, ...)
+     */
+    private function getSajuMonth(Carbon $date): int
+    {
+        $year = $date->year;
+
+        // 각 월의 절입일 확인
+        foreach (ManseryeokData::MONTH_TERMS as $month => $term) {
+            $termDate = $this->getSolarTermDate($year, $term);
+
+            // 다음 월의 절입일
+            $nextMonth = $month === 12 ? 1 : $month + 1;
+            $nextTerm = ManseryeokData::MONTH_TERMS[$nextMonth];
+            $nextYear = $month === 12 ? $year + 1 : $year;
+            $nextTermDate = $this->getSolarTermDate($nextYear, $nextTerm);
+
+            if ($date->gte($termDate) && $date->lt($nextTermDate)) {
+                return $month;
+            }
+        }
+
+        // 소한 이전 (축월)
+        return 12;
+    }
+
+    /**
+     * 절기 날짜 가져오기
+     */
+    private function getSolarTermDate(int $year, string $term): Carbon
+    {
+        // 절기 데이터가 있는 경우
+        if (isset(ManseryeokData::SOLAR_TERMS[$year][$term])) {
+            $monthDay = ManseryeokData::SOLAR_TERMS[$year][$term];
+            return Carbon::createFromFormat('Y-m-d', "{$year}-{$monthDay}");
+        }
+
+        // 데이터가 없는 경우 근사값 계산
+        return $this->calculateApproximateSolarTerm($year, $term);
+    }
+
+    /**
+     * 절기 근사값 계산 (데이터가 없는 년도용)
+     */
+    private function calculateApproximateSolarTerm(int $year, string $term): Carbon
+    {
+        // 24절기 평균 날짜 (근사값)
+        $approximateDates = [
+            '소한' => '01-06', '대한' => '01-20',
+            '입춘' => '02-04', '우수' => '02-19',
+            '경칩' => '03-06', '춘분' => '03-21',
+            '청명' => '04-05', '곡우' => '04-20',
+            '입하' => '05-06', '소만' => '05-21',
+            '망종' => '06-06', '하지' => '06-21',
+            '소서' => '07-07', '대서' => '07-23',
+            '입추' => '08-08', '처서' => '08-23',
+            '백로' => '09-08', '추분' => '09-23',
+            '한로' => '10-08', '상강' => '10-24',
+            '입동' => '11-08', '소설' => '11-22',
+            '대설' => '12-07', '동지' => '12-22',
+        ];
+
+        $monthDay = $approximateDates[$term] ?? '01-01';
+        return Carbon::createFromFormat('Y-m-d', "{$year}-{$monthDay}");
+    }
+
+    /**
+     * 년주 계산
+     */
+    private function calculateYearPillar(int $year): array
+    {
+        // 년간 계산: (년 - 4) % 10
+        $stemIndex = (($year - 4) % 10 + 10) % 10;
+        // 년지 계산: (년 - 4) % 12
+        $branchIndex = (($year - 4) % 12 + 12) % 12;
+
+        return [
+            'stem' => ManseryeokData::HEAVENLY_STEMS[$stemIndex],
+            'branch' => ManseryeokData::EARTHLY_BRANCHES[$branchIndex],
+            'stem_index' => $stemIndex,
+            'branch_index' => $branchIndex,
+        ];
+    }
+
+    /**
+     * 월주 계산 (절기 기준)
+     */
+    private function calculateMonthPillar(int $year, int $month, int $yearStemIndex): array
+    {
+        // 월지: 인월(1)=인(2), 묘월(2)=묘(3), ...
+        // month 1~12를 지지 인덱스로 변환
+        $branchIndex = ($month + 1) % 12; // 인월=1 -> 인(2)
+
+        // 월간: 년간에 따라 인월 시작 천간이 결정됨
+        $monthStemStart = ManseryeokData::YEAR_MONTH_STEM_START[$yearStemIndex];
+        $stemIndex = ($monthStemStart + $month - 1) % 10;
+
+        return [
+            'stem' => ManseryeokData::HEAVENLY_STEMS[$stemIndex],
+            'branch' => ManseryeokData::EARTHLY_BRANCHES[$branchIndex],
+            'stem_index' => $stemIndex,
+            'branch_index' => $branchIndex,
+        ];
+    }
+
+    /**
+     * 일주 계산 (만세력 기준일 사용)
+     */
+    private function calculateDayPillar(Carbon $date): array
+    {
+        // 기준일: 2000년 1월 1일 = 갑진일(甲辰日)
+        $baseDate = Carbon::create(2000, 1, 1);
+        $baseStemIndex = ManseryeokData::DAY_REFERENCE['stem_index'];
+        $baseBranchIndex = ManseryeokData::DAY_REFERENCE['branch_index'];
+
+        // 기준일로부터의 일수 차이
+        $daysDiff = $baseDate->diffInDays($date, false);
+
+        // 천간 계산 (10일 주기)
+        $stemIndex = (($baseStemIndex + $daysDiff) % 10 + 10) % 10;
+        // 지지 계산 (12일 주기)
+        $branchIndex = (($baseBranchIndex + $daysDiff) % 12 + 12) % 12;
+
+        return [
+            'stem' => ManseryeokData::HEAVENLY_STEMS[$stemIndex],
+            'branch' => ManseryeokData::EARTHLY_BRANCHES[$branchIndex],
+            'stem_index' => $stemIndex,
+            'branch_index' => $branchIndex,
+        ];
+    }
+
+    /**
+     * 시주 계산 (일간 기준)
+     */
+    private function calculateHourPillar(int $dayStemIndex, int $hour): array
+    {
+        // 시간을 지지로 변환
+        $branch = ManseryeokData::HOUR_BRANCHES[$hour];
+        $branchIndex = ManseryeokData::getBranchIndex($branch);
+
+        // 시간: 일간에 따라 자시 시작 천간이 결정됨
+        $hourStemStart = ManseryeokData::DAY_HOUR_STEM_START[$dayStemIndex];
+        $stemIndex = ($hourStemStart + $branchIndex) % 10;
+
+        return [
+            'stem' => ManseryeokData::HEAVENLY_STEMS[$stemIndex],
+            'branch' => $branch,
+            'stem_index' => $stemIndex,
+            'branch_index' => $branchIndex,
+        ];
+    }
+
+    /**
+     * 시간 문자열 파싱
      */
     private function parseHour(?string $timeString): int
     {
         if (!$timeString) {
-            return 12; // Default to noon if not provided
+            return 12; // 기본값: 정오
         }
 
-        // Handle Korean time names
+        // 한국어 시간명 처리
         $koreanTimes = [
             '자시' => 0, '축시' => 2, '인시' => 4, '묘시' => 6,
             '진시' => 8, '사시' => 10, '오시' => 12, '미시' => 14,
@@ -108,7 +265,7 @@ class SajuCalculatorService
             return $koreanTimes[$timeString];
         }
 
-        // Handle HH:MM format
+        // HH:MM 형식 처리
         if (preg_match('/^(\d{1,2}):?(\d{2})?$/', $timeString, $matches)) {
             return (int) $matches[1];
         }
@@ -117,101 +274,7 @@ class SajuCalculatorService
     }
 
     /**
-     * Calculate year pillar
-     */
-    private function calculateYearPillar(int $year): array
-    {
-        // 년간 계산: (년 - 4) % 10
-        $stemIndex = ($year - 4) % 10;
-        // 년지 계산: (년 - 4) % 12
-        $branchIndex = ($year - 4) % 12;
-
-        return [
-            'stem' => self::HEAVENLY_STEMS[$stemIndex],
-            'branch' => self::EARTHLY_BRANCHES[$branchIndex],
-        ];
-    }
-
-    /**
-     * Calculate month pillar
-     */
-    private function calculateMonthPillar(int $year, int $month): array
-    {
-        // 월지는 고정 (입춘 기준이지만 간단히 처리)
-        // 1월=축, 2월=인, 3월=묘, ... 12월=자
-        $monthBranches = [
-            1 => '축', 2 => '인', 3 => '묘', 4 => '진',
-            5 => '사', 6 => '오', 7 => '미', 8 => '신',
-            9 => '유', 10 => '술', 11 => '해', 12 => '자',
-        ];
-
-        $branch = $monthBranches[$month];
-        $branchIndex = array_search($branch, self::EARTHLY_BRANCHES);
-
-        // 월간 계산: 년간에 따라 결정
-        $yearStemIndex = ($year - 4) % 10;
-        // 월간 공식: (년간 * 2 + 월) % 10
-        $stemIndex = (($yearStemIndex % 5) * 2 + $month) % 10;
-
-        return [
-            'stem' => self::HEAVENLY_STEMS[$stemIndex],
-            'branch' => $branch,
-        ];
-    }
-
-    /**
-     * Calculate day pillar using a base date method
-     */
-    private function calculateDayPillar(Carbon $date): array
-    {
-        // Use January 1, 1900 as base date (갑자일)
-        $baseDate = Carbon::create(1900, 1, 1);
-        $daysDiff = $baseDate->diffInDays($date, false);
-
-        // 1900년 1월 1일은 갑자일 (index 0)
-        // Add offset for the actual 1900-01-01 day pillar
-        $baseDayOffset = 0; // 갑자
-
-        $totalDays = $daysDiff + $baseDayOffset;
-
-        // Ensure positive index
-        $stemIndex = (($totalDays % 10) + 10) % 10;
-        $branchIndex = (($totalDays % 12) + 12) % 12;
-
-        return [
-            'stem' => self::HEAVENLY_STEMS[$stemIndex],
-            'branch' => self::EARTHLY_BRANCHES[$branchIndex],
-        ];
-    }
-
-    /**
-     * Calculate hour pillar
-     */
-    private function calculateHourPillar(string $dayStem, int $hour): array
-    {
-        // Adjust for 자시 starting at 23:00
-        if ($hour === 23) {
-            $hour = 0;
-        }
-
-        $branch = self::HOUR_BRANCHES[$hour];
-        $branchIndex = array_search($branch, self::EARTHLY_BRANCHES);
-
-        // 시간 계산: 일간에 따라 시간이 결정됨
-        $dayStemIndex = array_search($dayStem, self::HEAVENLY_STEMS);
-
-        // 시간 공식
-        $hourStemBase = ($dayStemIndex % 5) * 2;
-        $stemIndex = ($hourStemBase + $branchIndex) % 10;
-
-        return [
-            'stem' => self::HEAVENLY_STEMS[$stemIndex],
-            'branch' => $branch,
-        ];
-    }
-
-    /**
-     * Calculate five elements distribution
+     * 오행 분포 계산
      */
     private function calculateFiveElements(array $pillars): array
     {
@@ -224,16 +287,47 @@ class SajuCalculatorService
         ];
 
         foreach ($pillars as $pillar) {
-            // Count stem element
-            if (isset(self::FIVE_ELEMENTS[$pillar['stem']])) {
-                $elements[self::FIVE_ELEMENTS[$pillar['stem']]]++;
+            // 천간 오행
+            if (isset(ManseryeokData::STEM_ELEMENTS[$pillar['stem']])) {
+                $elements[ManseryeokData::STEM_ELEMENTS[$pillar['stem']]]++;
             }
-            // Count branch element
-            if (isset(self::FIVE_ELEMENTS[$pillar['branch']])) {
-                $elements[self::FIVE_ELEMENTS[$pillar['branch']]]++;
+            // 지지 오행
+            if (isset(ManseryeokData::BRANCH_ELEMENTS[$pillar['branch']])) {
+                $elements[ManseryeokData::BRANCH_ELEMENTS[$pillar['branch']]]++;
             }
         }
 
         return $elements;
+    }
+
+    /**
+     * 오행 한글명 반환
+     */
+    public function getElementKorean(string $element): string
+    {
+        $korean = [
+            'wood' => '목(木)',
+            'fire' => '화(火)',
+            'earth' => '토(土)',
+            'metal' => '금(金)',
+            'water' => '수(水)',
+        ];
+
+        return $korean[$element] ?? $element;
+    }
+
+    /**
+     * 사주 요약 문자열 반환
+     */
+    public function getSajuSummary(array $saju): string
+    {
+        return sprintf(
+            "년주: %s | 월주: %s | 일주: %s | 시주: %s\n일주(日主): %s",
+            $saju['year_pillar'],
+            $saju['month_pillar'],
+            $saju['day_pillar'],
+            $saju['hour_pillar'],
+            $saju['day_master']
+        );
     }
 }
